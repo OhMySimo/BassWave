@@ -10,9 +10,9 @@ sudo docker run -it \
   --network=host \
   --device=/dev/kfd --device=/dev/dri \
   --ipc=host \
-  --shm-size=256m \
-  --cpus=8.0 \
-  --cpu-shares=768 \
+  --shm-size=512m \
+  --cpus=6.0 \
+  --cpu-shares=512 \
   --memory=12g \
   -e TF_NUM_INTEROP_THREADS=2 \
   -e TF_NUM_INTRAOP_THREADS=4 \

@@ -1,0 +1,4 @@
+python test_midi_alignment.py \
+    --metadata_jsonl /media/simone/NVME/MidiDataset/metadata.jsonl \
+    --entry_idx 0 \
+    --output test.png

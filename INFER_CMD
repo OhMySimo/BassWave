@@ -1,0 +1,4 @@
+python basswave_infer.py \
+    --run_dir /media/simone/NVME/runs/basswave_v3 \
+    --input   ./infer_test/input.wav \
+    --output  ./infer_test/resynth.wav

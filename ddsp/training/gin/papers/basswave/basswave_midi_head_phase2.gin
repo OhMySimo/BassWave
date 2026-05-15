@@ -1,0 +1,167 @@
+# -*-Python-*-
+# basswave_midi_head_phase2.gin — Phase 2: joint fine-tune dopo surgery.
+#
+# PREREQUISITO
+# ------------
+# Lo script expand_decoder_for_midi_cond.py deve essere stato lanciato per
+# espandere il decoder da 3 → 4 input_keys, zero-paddando i nuovi 512 righe
+# di rnn.kernel e out_stack[0].kernel. Il ckpt risultante è in:
+#   /media/simone/NVME/runs/basswave_v4_phase2/
+#
+# Perché una sola fase (no più Phase 2A/2B):
+# ----------------------------------------
+# I 60 nuovi canali midi_cond sul Dense del decoder iniziano a zero. Quindi
+# al passo 0 il decoder produce output IDENTICO a Phase 1 (midi_cond × 0 = 0).
+# Lo "shock" del gentle-unfreeze (Phase 2A) non è più necessario perché lo
+# zero-init lo previene strutturalmente. Possiamo abilitare midi_cond da
+# head + pitch fusion + wet ramp dal primo step in sicurezza.
+#
+# Stack:
+#   1. papers/basswave/basswave_44k.gin
+#   2. papers/basswave/basswave_ram_budget.gin
+#   3. papers/basswave/basswave_midi_head_phase2.gin     (questo file)
+#
+# Run:
+#   ddsp_run --mode=train \
+#     --save_dir=/media/simone/NVME/runs/basswave_v4_phase2 \
+#     --restore_dir=/media/simone/NVME/runs/basswave_v4_phase2 \
+#     --gin_file=papers/basswave/basswave_44k.gin \
+#     --gin_file=papers/basswave/basswave_ram_budget.gin \
+#     --gin_file=papers/basswave/basswave_midi_head_phase2.gin \
+#     --gin_param="train.batch_size=2"
+#
+# Durata: ~100k step.
+
+
+example_secs = 4
+
+
+# =====
+# 1. Data provider.
+# =====
+BassWaveWithSidecarProvider.file_pattern = \
+    '/media/simone/NVME/MidiDataset/BassWave_TFR/basswave-train-*.tfrecord'
+BassWaveWithSidecarProvider.sidecar_file_pattern = \
+    '/media/simone/NVME/MidiDataset/BassWave_TFR_MIDI_v2/basswave-train-midi-*.tfrecord'
+BassWaveWithSidecarProvider.balance_presets = True
+BassWaveWithSidecarProvider.sample_rate = %sample_rate
+BassWaveWithSidecarProvider.frame_rate = %frame_rate
+BassWaveWithSidecarProvider.example_secs = %example_secs
+BassWaveWithSidecarProvider.centered = True
+BassWaveWithSidecarProvider.interleave_cycle_length = 8
+BassWaveWithSidecarProvider.interleave_block_length = 4
+BassWaveWithSidecarProvider.shuffle_buffer_size = 64
+BassWaveWithSidecarProvider.prefetch_size = 2
+
+train.data_provider = @BassWaveWithSidecarProvider()
+
+
+# =====
+# 2. Restore: tutti i sub-moduli dal ckpt SURGERIATO.
+# =====
+Trainer.restore_keys = ['preprocessor', 'encoder', 'decoder',
+                         'processor_group', 'mel_extractor', 'midi_head']
+
+
+# =====
+# 3. Preprocessor time_steps (essenziale — vedi phase1).
+# =====
+DenoisingF0LoudnessPreprocessor.time_steps = 201
+
+
+# =====
+# 4. LogMelExtractor + MIDIHead (architettura identica a Phase 1).
+# =====
+LogMelExtractor.sample_rate = 16000
+LogMelExtractor.n_mels = 128
+LogMelExtractor.win_length = 1024
+LogMelExtractor.hop_length = 320
+LogMelExtractor.fmin = 40.0
+LogMelExtractor.fmax = 8000.0
+
+MIDIHead.n_mels = 128
+MIDIHead.ch_d1 = 256
+MIDIHead.ch_d2 = 384
+MIDIHead.ch_bottleneck = 512
+MIDIHead.bigru_units = 256
+
+
+# =====
+# 5. MIDIHeadLoss — pesi medi.
+# =====
+# Head già OK ma deve continuare a ridursi mentre cambia il regime (predicted
+# vs GT midi_cond). Pesi un po' più alti per protezione iniziale.
+MIDIHeadLoss.lambda_onset      = 0.5
+MIDIHeadLoss.lambda_subframe   = 0.15
+MIDIHeadLoss.lambda_silence    = 0.8
+MIDIHeadLoss.lambda_pitch      = 0.5
+MIDIHeadLoss.lambda_velocity   = 0.15
+MIDIHeadLoss.lambda_ks         = 0.25
+MIDIHeadLoss.onset_pos_weight   = 10.0
+MIDIHeadLoss.silence_pos_weight = 2.0
+MIDIHeadLoss.ks_pos_weight      = 20.0
+MIDIHeadLoss.onset_focal_gamma  = 1.5
+
+
+# =====
+# 6. DenoisingAutoencoder — Phase 2 flags (tutto attivo).
+# =====
+DenoisingAutoencoder.mel_extractor       = @LogMelExtractor()
+DenoisingAutoencoder.midi_head           = @MIDIHead()
+DenoisingAutoencoder.midi_head_loss_obj  = @MIDIHeadLoss()
+
+DenoisingAutoencoder.freeze_backbone          = False    # ⚡ unfreezed
+DenoisingAutoencoder.use_teacher_forcing_midi = False    # midi_cond from head
+DenoisingAutoencoder.use_pitch_fusion         = True     # CREPE+head fusion
+DenoisingAutoencoder.use_silence_gate         = True
+DenoisingAutoencoder.silence_gate_floor       = 0.0
+
+
+# =====
+# 7. Decoder input_keys — 4 keys (post-surgery).
+# =====
+# Surgery ha esteso rnn.kernel + out_stack[0].kernel con zero-pad.
+# Quindi al passo 0 il decoder ignora midi_cond, imparerà gradualmente
+# tramite gradient descent (i pesi 0 cresceranno solo se utile).
+RnnFcDecoder.input_keys = ('ld_scaled', 'f0_scaled', 'z', 'midi_cond')
+
+
+# =====
+# 8. LR schedule per Phase 2.
+# =====
+# Cosine-style decay 1e-5 → ~3e-6 su 100k step.
+learning_rate = 1e-5
+Trainer.learning_rate = %learning_rate
+Trainer.lr_decay_steps = 10000
+Trainer.lr_decay_rate = 0.896
+Trainer.grad_clip_norm = 2.0
+Trainer.checkpoints_to_keep = 20
+
+train.batch_size = 2
+# num_steps è ASSOLUTO rispetto allo step counter del nuovo ckpt.
+# Il ckpt surgeriato mantiene lo step Phase 1 (es. 124000) per continuità
+# di TB / monitoring. Phase 2 lavora ~100k step → num_steps = phase1_step + 100000.
+# Aggiorna in base allo step Phase 1 effettivo.
+train.num_steps = 224000
+train.steps_per_summary = 500
+train.steps_per_save = 2000
+
+
+# =====
+# 9. Degradation — strong-ramp 65% → 100% sui primi 50k.
+# =====
+DegradationPipeline:
+  sample_rate = %sample_rate
+  phasing_wet = 65
+  ghosting_wet = 65
+  wrong_eq_wet = 65
+  compression_wet = 65
+  dynamic_eq_wet = 65
+  bandwidth_wet = 65
+  clean_passthrough_prob = 0.10
+  min_n_apply = 4
+  max_n_apply = 6
+  wet_schedule_steps = 50000
+  wet_schedule_start_step = 0
+  preserve_loudness = True
+  max_loudness_gain_db = 12.0

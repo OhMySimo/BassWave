@@ -34,7 +34,8 @@ class Trainer(object):
                lr_decay_steps=10000,
                lr_decay_rate=0.98,
                grad_clip_norm=3.0,
-               restore_keys=None):
+               restore_keys=None,
+               reset_optimizer_on_restore=False):
     """Constructor.
 
     Args:
@@ -47,12 +48,16 @@ class Trainer(object):
       grad_clip_norm: Norm level by which to clip gradients.
       restore_keys: List of names of model properties to restore. If no keys are
         passed, restore the whole model.
+      reset_optimizer_on_restore: If True, reset optimizer.iterations to 0 after
+        restore. Use when resuming model weights from a previous run while
+        intentionally starting a fresh LR schedule (e.g. curriculum transfer).
     """
     self.model = model
     self.strategy = strategy
     self.checkpoints_to_keep = checkpoints_to_keep
     self.grad_clip_norm = grad_clip_norm
     self.restore_keys = restore_keys
+    self.reset_optimizer_on_restore = reset_optimizer_on_restore
 
     # Create an optimizer.
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
@@ -121,6 +126,12 @@ class Trainer(object):
       else:
         checkpoint.restore(latest_checkpoint).expect_partial()
       logging.info('Loaded checkpoint %s', latest_checkpoint)
+
+    if self.reset_optimizer_on_restore:
+      self.optimizer.iterations.assign(0)
+      logging.info('Trainer: reset optimizer.iterations to 0 '
+                   '(reset_optimizer_on_restore=True).')
+
     logging.info('Loading model took %.1f seconds', time.time() - start_time)
 
   @property

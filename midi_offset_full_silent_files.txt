@@ -1,0 +1,10 @@
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_01__Tp+0__PkVintage.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_01__Tp+0__Pk70s_rock_amp_picked.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_02__Tp+0__PkVintage.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_02__Tp+0__PkVintage_Picked.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_03__Tp+0__PkVintage.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_03__Tp+0__PkVintage_Picked.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_04__Tp+0__PkVintage_Picked.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_05__Tp+0__PkVintage.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_06__Tp+0__PkVintage_Picked.flac
+/media/simone/NVME/MidiDataset/FLAC_AUG/000629@EBX_Acoustic/905@Straight_4#4/120-S062@Verse/Variation_06__Tp+0__PkVintage.flac

@@ -68,8 +68,14 @@ class BasicEvaluator(BaseEvaluator):
       self._avg_losses[k].update_state(v)
 
   def sample(self, batch, outputs, step):
+    # batch['audio'] = clean audio from dataset (before degradation).
+    # outputs['audio'] = corrupted audio seen by the encoder (set by
+    #   DenoisingF0LoudnessPreprocessor, which overwrites features['audio']
+    #   with the degradation-pipeline output).
+    # outputs['audio_gen'] = synthesized output.
     audio = batch['audio']
     audio_gen = outputs['audio_gen']
+    audio_degraded = outputs.get('audio_corrupted', None)  # None for non-denoising runs
 
     audio_gen = np.array(audio_gen)
 
@@ -78,10 +84,16 @@ class BasicEvaluator(BaseEvaluator):
         audio_gen, step, self._sample_rate, name='audio_generated')
     summaries.audio_summary(
         audio, step, self._sample_rate, name='audio_original')
+    if audio_degraded is not None:
+      summaries.audio_summary(
+          audio_degraded, step, self._sample_rate, name='audio_degraded')
 
     # Add plots.
     summaries.waveform_summary(audio, audio_gen, step)
     summaries.spectrogram_summary(audio, audio_gen, step)
+    if audio_degraded is not None:
+      summaries.spectrogram_summary(
+          audio, audio_degraded, step, tag='degraded_vs_original')
 
   def flush(self, step):
     latest_losses = {}
@@ -245,5 +257,3 @@ class MidiHeuristicEvaluator(BaseEvaluator):
 
   def flush(self, step):
     self._midi_metrics.flush(step)
-
-

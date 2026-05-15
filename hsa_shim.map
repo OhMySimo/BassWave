@@ -1,0 +1,13 @@
+# hsa_shim.map
+cat > hsa_shim.map << 'EOF'
+ROCR_1 {
+    global:
+        hsa_amd_memory_get_preferred_copy_engine;
+    local:
+        *;
+};
+EOF
+
+gcc -shared -fPIC \
+    -Wl,--version-script=hsa_shim.map \
+    -o /home/simone/hsa_shim.so hsa_shim.c

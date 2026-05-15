@@ -1,0 +1,193 @@
+# -*-Python-*-
+# basswave_midi_head_phase1.gin — Phase 1: backbone-frozen MIDI head warm-up.
+#
+# Strategy
+# --------
+# Encoder + Decoder rimangono CONGELATI ai pesi v3 (preset solidi timbrici).
+# Solo la MIDIHead viene addestrata, da pesi inizializzati casualmente.
+# Il decoder riceve midi_cond TEACHER-FORCED dai MIDI ground truth, NON
+# dalle predictions della head — quindi la qualità audio del decoder non
+# si degrada durante questa fase, e la head impara a ricavare onset /
+# silenzio / pitch / velocity / KS dall'audio mel-spec senza alcun rischio
+# di instabilità del decoder.
+#
+# Stack:
+#   1. papers/basswave/basswave_44k.gin
+#   2. papers/basswave/basswave_ram_budget.gin
+#   3. papers/basswave/basswave_midi_head_phase1.gin   (questo file)
+#
+# Run command:
+#   ddsp_run \
+#     --mode=train \
+#     --save_dir=/media/simone/NVME/runs/basswave_v4_phase1 \
+#     --restore_dir=/media/simone/NVME/runs/basswave_v4_phase1 \
+#     --gin_file=papers/basswave/basswave_44k.gin \
+#     --gin_file=papers/basswave/basswave_ram_budget.gin \
+#     --gin_file=papers/basswave/basswave_midi_head_phase1.gin \
+#     --gin_param="train.batch_size=2"
+#
+# Prerequisiti
+#   * Sidecar TFR v2 in /media/simone/NVME/MidiDataset/BassWave_TFR_MIDI_v2
+#   * Checkpoint v3 (encoder+decoder timbric-trained) copiato in
+#     /media/simone/NVME/runs/basswave_v4_phase1/ con il file `checkpoint`
+#     puntato.
+#
+# Durata consigliata: ~15-20k step. Stop quando `midi/onset` < 0.5 e
+# `midi/silence` < 0.2 e si stabilizzano. Salva il checkpoint, passa a
+# Phase 2.
+
+
+# =====
+# 1. Data provider con sidecar v2.
+# =====
+# Sostituisce BassWaveTFRecordProvider con la variante che fa zip 1:1
+# dei sidecar v2 (allineamento corretto verificato).
+BassWaveWithSidecarProvider.file_pattern = \
+    '/media/simone/NVME/MidiDataset/BassWave_TFR/basswave-train-*.tfrecord'
+BassWaveWithSidecarProvider.sidecar_file_pattern = \
+    '/media/simone/NVME/MidiDataset/BassWave_TFR_MIDI_v2/basswave-train-midi-*.tfrecord'
+BassWaveWithSidecarProvider.balance_presets = True
+BassWaveWithSidecarProvider.sample_rate = %sample_rate
+BassWaveWithSidecarProvider.frame_rate = %frame_rate
+BassWaveWithSidecarProvider.example_secs = %example_secs
+BassWaveWithSidecarProvider.centered = True
+BassWaveWithSidecarProvider.interleave_cycle_length = 8
+BassWaveWithSidecarProvider.interleave_block_length = 4
+BassWaveWithSidecarProvider.shuffle_buffer_size = 64
+BassWaveWithSidecarProvider.prefetch_size = 2
+
+train.data_provider = @BassWaveWithSidecarProvider()
+
+
+# =====
+# 2. Restore strategy: SOLO model weights (no optimizer, no head).
+# =====
+# Encoder + decoder hanno pesi v3. La head non è nel ckpt v3 quindi Keras
+# la inizializza casualmente — esattamente quello che vogliamo.
+# Importante: l'optimizer è fresco, quindi LR schedule riparte da 0.
+Trainer.restore_keys = ['model']
+
+
+# =====
+# 3. LogMelExtractor + MIDIHead config.
+# =====
+LogMelExtractor.sample_rate = 16000     # audio_16k a 16 kHz
+LogMelExtractor.n_mels = 128
+LogMelExtractor.win_length = 1024
+LogMelExtractor.hop_length = 320        # 50 Hz frame rate a 16 kHz
+LogMelExtractor.fmin = 40.0
+LogMelExtractor.fmax = 8000.0
+
+MIDIHead.n_mels = 128
+MIDIHead.ch_d1 = 256
+MIDIHead.ch_d2 = 384
+MIDIHead.ch_bottleneck = 512
+MIDIHead.bigru_units = 256
+
+
+# =====
+# 4. MIDIHeadLoss config.
+# =====
+MIDIHeadLoss.lambda_onset      = 1.0
+MIDIHeadLoss.lambda_subframe   = 0.3
+MIDIHeadLoss.lambda_silence    = 1.5
+MIDIHeadLoss.lambda_pitch      = 1.0
+MIDIHeadLoss.lambda_velocity   = 0.3
+MIDIHeadLoss.lambda_ks         = 0.5
+MIDIHeadLoss.onset_pos_weight   = 10.0
+MIDIHeadLoss.silence_pos_weight = 2.0
+MIDIHeadLoss.ks_pos_weight      = 20.0
+MIDIHeadLoss.onset_focal_gamma  = 1.5
+
+
+# =====
+# 5. DenoisingAutoencoder: head wiring + Phase 1 flags.
+# =====
+DenoisingAutoencoder.mel_extractor       = @LogMelExtractor()
+DenoisingAutoencoder.midi_head           = @MIDIHead()
+DenoisingAutoencoder.midi_head_loss_obj  = @MIDIHeadLoss()
+
+# Phase 1 flags:
+DenoisingAutoencoder.freeze_backbone          = True       # ❄ enc + dec
+DenoisingAutoencoder.use_teacher_forcing_midi = True       # midi_cond from GT
+DenoisingAutoencoder.use_pitch_fusion         = False      # CREPE puro
+DenoisingAutoencoder.use_silence_gate         = True       # gate inferenza
+DenoisingAutoencoder.silence_gate_floor       = 0.0
+
+
+# =====
+# 6. Decoder: aggiungere 'midi_cond' a input_keys.
+# =====
+# Il decoder originale ha:
+#   input_keys = ('ld_scaled', 'f0_scaled', 'z')
+# In Phase 1 il decoder è freezato MA la sua chiamata richiede comunque
+# input_keys che combaciano con il features dict che gli passiamo. Quindi
+# qui ridefiniamo input_keys per includere 'midi_cond'.
+#
+# IMPORTANTE: il decoder ha pesi v3 trainati con input_keys ORIGINALI.
+# Aggiungere 'midi_cond' significa aggiungere un nuovo input al primo
+# Conv1D del decoder, che ha 'extra' canali in più. Keras inizializzerà
+# i NUOVI canali aggiuntivi del primo layer del decoder casualmente
+# (perché non presenti nel ckpt v3); i vecchi 561 canali (ld+f0+z =
+# 1+1+48+... in realtà 1+1+48=50 ma il decoder usa una FC, vedi sotto)
+# saranno restorati da v3.
+#
+# WAIT — il decoder usa RnnFcDecoder che applica una Dense initialmente
+# sui input keys concatenati, NON una Conv1D. Vedi `RnnFcDecoder.call`:
+#   x = tf.concat([features[k] for k in input_keys], axis=-1)
+#   for stack: dense -> rnn -> dense -> dense
+# Aggiungere 'midi_cond' (60 dim) → primo Dense ha 50→ch=512 vs 110→512.
+# I vecchi 50 input weights vengono restorati, i nuovi 60 input weights
+# sono random-init. Questo CAMBIA il comportamento del decoder.
+#
+# In Phase 1 questo non è un problema perché:
+#   (a) decoder freezato → primo Dense non si aggiorna
+#   (b) midi_cond è teacher-forced (= MIDI GT) → input pulito
+#   (c) i nuovi 60 input weights sono fissi a init random, quindi
+#       contribuiscono come una "constant bias" basata su GT MIDI
+#   (d) il decoder non sa USARE midi_cond, ma non si rompe nemmeno
+#       perché i vecchi 50 input continuano a dominare.
+#
+# In Phase 2 il decoder UNFREEZED imparerà a usare midi_cond.
+RnnFcDecoder.input_keys = ('ld_scaled', 'f0_scaled', 'z', 'midi_cond')
+
+
+# =====
+# 7. LR schedule per Phase 1.
+# =====
+# Solo la head si addestra. LR un po' più alto del solito per accelerare:
+# head ha pesi random, deve fare strada.
+learning_rate = 1e-4
+Trainer.learning_rate = %learning_rate
+Trainer.lr_decay_steps = 10000
+Trainer.lr_decay_rate = 0.95
+Trainer.grad_clip_norm = 1.0
+Trainer.checkpoints_to_keep = 10
+
+train.batch_size = 2
+train.num_steps = 20000           # Phase 1 = 15-20k step
+train.steps_per_summary = 500
+train.steps_per_save = 2000
+
+
+# =====
+# 8. Degradation pipeline: STESSA di v3.
+# =====
+# La head impara a essere robusta a degradation come l'encoder.
+# Wet schedule disabilitato (steps=0) perché Phase 1 è solo head warmup;
+# encoder freezato non beneficia di più curriculum. Manteniamo i livelli
+# correnti da v3 (~65% wet).
+DegradationPipeline:
+  sample_rate = %sample_rate
+  phasing_wet = 65
+  ghosting_wet = 65
+  wrong_eq_wet = 65
+  compression_wet = 65
+  dynamic_eq_wet = 65
+  bandwidth_wet = 65
+  clean_passthrough_prob = 0.10
+  min_n_apply = 4
+  max_n_apply = 6
+  wet_schedule_steps = 0           # disabilitato in Phase 1
+  preserve_loudness = True
+  max_loudness_gain_db = 12.0

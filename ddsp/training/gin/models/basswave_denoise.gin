@@ -1,0 +1,112 @@
+# -*-Python-*-
+# BassWave Denoising Autoencoder — DDSP at 44.1 kHz with the new 6-degradation
+# on-the-fly augmentation pipeline.
+
+import ddsp
+import ddsp.training
+
+# =====
+# Model
+# =====
+get_model.model = @models.DenoisingAutoencoder()
+
+frame_rate = 50
+frame_size = 2048
+sample_rate = 44100
+n_samples = 177282
+
+# =====
+# Preprocessor (denoising) + DegradationPipeline
+# =====
+DenoisingAutoencoder.preprocessor = \
+    @preprocessing_denoise.DenoisingF0LoudnessPreprocessor()
+DenoisingF0LoudnessPreprocessor:
+  time_steps = 200
+  frame_rate = %frame_rate
+  sample_rate = %sample_rate
+  compute_loudness = False
+  degradation_pipeline = @degradations.DegradationPipeline()
+
+# All wet/dry knobs are 0..100 (audio-plugin semantics). Defaults are
+# moderate. Tune per-degradation as your validation results suggest.
+DegradationPipeline:
+  sample_rate = %sample_rate
+  phasing_wet = 50
+  ghosting_wet = 50
+  wrong_eq_wet = 50
+  compression_wet = 50
+  dynamic_eq_wet = 50
+  bandwidth_wet = 50
+  clean_passthrough_prob = 0.10
+  min_n_apply = 2
+  max_n_apply = 6
+  # Loudness preservation: rescale degraded output to match clean input RMS.
+  # Without this the compressor's makeup gain leaks loudness information into
+  # the corrupted pathway, letting the model "cheat" by detecting compression
+  # via volume rather than reconstructing timbre.
+  preserve_loudness = True
+  max_loudness_gain_db = 12.0
+
+# =====
+# Encoder (z_dim=48)
+# =====
+DenoisingAutoencoder.encoder = @encoders.MfccTimeDistributedRnnEncoder()
+MfccTimeDistributedRnnEncoder:
+  rnn_channels = 512
+  rnn_type = 'gru'
+  z_dims = 48
+  z_time_steps = 250
+
+# =====
+# Decoder
+# =====
+DenoisingAutoencoder.decoder = @decoders.RnnFcDecoder()
+RnnFcDecoder:
+  rnn_channels = 512
+  rnn_type = 'gru'
+  ch = 512
+  layers_per_stack = 3
+  input_keys = ('ld_scaled', 'f0_scaled', 'z')
+  output_splits = (('amps', 1),
+                   ('harmonic_distribution', 256),
+                   ('noise_magnitudes', 256))
+
+# =====
+# Losses
+# =====
+DenoisingAutoencoder.losses = [@losses.SpectralLoss()]
+SpectralLoss:
+  loss_type = 'L1'
+  mag_weight = 1.0
+  logmag_weight = 1.0
+  fft_sizes = [8192, 4096, 2048, 1024, 512, 256]
+
+# =====
+# Processor group
+# =====
+DenoisingAutoencoder.processor_group = @processors.ProcessorGroup()
+ProcessorGroup.dag = [
+  (@synths.Harmonic(),
+    ['amps', 'harmonic_distribution', 'f0_hz']),
+  (@synths.FilteredNoise(),
+    ['noise_magnitudes']),
+  (@processors.Add(),
+    ['filtered_noise/signal', 'harmonic/signal']),
+]
+
+Harmonic:
+  name = 'harmonic'
+  n_samples = %n_samples
+  sample_rate = %sample_rate
+  normalize_below_nyquist = True
+  scale_fn = @core.exp_sigmoid
+  amp_resample_method = 'linear'
+  use_angular_cumsum = True
+
+FilteredNoise:
+  name = 'filtered_noise'
+  n_samples = %n_samples
+  window_size = 0
+  scale_fn = @core.exp_sigmoid
+
+processors.Add.name = 'add'

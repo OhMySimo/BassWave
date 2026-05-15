@@ -1,0 +1,214 @@
+# -*-Python-*-
+# basswave_midi_head_phase3_distill.gin — Phase 3: self-distillation training.
+#
+# Strategia
+# ---------
+# Partiamo da P1 finale (ckpt 124k). Encoder + decoder UNFREEZED.
+# La MIDI head condiziona l'encoder INDIRETTAMENTE via un piccolo Projector
+# (midi_cond -> z_aux) e una aux loss MSE(z, z_aux). 
+# Il decoder NON riceve midi_cond direttamente (input_keys=3 come P1).
+# Quindi:
+#   • encoder spinto a produrre z musicalmente strutturato
+#   • decoder libero di migliorare il timbro tramite spectral_loss su tutto
+#     il training (= prima volta che il decoder si addestra dopo v3)
+#   • niente chirurgia checkpoint
+#   • niente rischio di corruzione decoder come in Phase 2
+#
+# Architettura runtime (nessun cambio strutturale rispetto a P1):
+#   audio --> encoder --> z [B, T, 48]
+#         \-> head    --> midi_cond [B, T, 60]
+#                              |
+#                              v
+#                          projector --> z_aux [B, T, 48]
+#                                          |
+#                            aux_loss = MSE(z, z_aux)
+#
+#   z + ld + f0 ----> decoder ----> processor_group --> audio_synth
+#                                                            |
+#                                                spectral_loss(audio_clean)
+#
+# Stack:
+#   1. papers/basswave/basswave_44k.gin
+#   2. papers/basswave/basswave_ram_budget.gin
+#   3. papers/basswave/basswave_midi_head_phase3_distill.gin
+#
+# Run:
+#   ddsp_run --mode=train \
+#     --save_dir=/media/simone/NVME/runs/basswave_v4_phase3 \
+#     --restore_dir=/media/simone/NVME/runs/basswave_v4_phase3 \
+#     --gin_file=papers/basswave/basswave_44k.gin \
+#     --gin_file=papers/basswave/basswave_ram_budget.gin \
+#     --gin_file=papers/basswave/basswave_midi_head_phase3_distill.gin \
+#     --gin_param="train.batch_size=2"
+#
+# Setup directory:
+#   mkdir /media/simone/NVME/runs/basswave_v4_phase3
+#   cp /media/simone/NVME/runs/basswave_v4_phase1/ckpt-124000.* \
+#      /media/simone/NVME/runs/basswave_v4_phase3/
+#   echo 'model_checkpoint_path: "ckpt-124000"' \
+#      > /media/simone/NVME/runs/basswave_v4_phase3/checkpoint
+#   echo 'all_model_checkpoint_paths: "ckpt-124000"' \
+#      >> /media/simone/NVME/runs/basswave_v4_phase3/checkpoint
+
+
+example_secs = 4
+
+
+# =====
+# 1. Data provider.
+# =====
+BassWaveWithSidecarProvider.file_pattern = \
+    '/media/simone/NVME/MidiDataset/BassWave_TFR/basswave-train-*.tfrecord'
+BassWaveWithSidecarProvider.sidecar_file_pattern = \
+    '/media/simone/NVME/MidiDataset/BassWave_TFR_MIDI_v2/basswave-train-midi-*.tfrecord'
+BassWaveWithSidecarProvider.balance_presets = True
+BassWaveWithSidecarProvider.sample_rate = %sample_rate
+BassWaveWithSidecarProvider.frame_rate = %frame_rate
+BassWaveWithSidecarProvider.example_secs = %example_secs
+BassWaveWithSidecarProvider.centered = True
+BassWaveWithSidecarProvider.interleave_cycle_length = 8
+BassWaveWithSidecarProvider.interleave_block_length = 4
+BassWaveWithSidecarProvider.shuffle_buffer_size = 64
+BassWaveWithSidecarProvider.prefetch_size = 2
+
+train.data_provider = @BassWaveWithSidecarProvider()
+
+
+# =====
+# 2. Restore: model from P1, optimizer fresco.
+# =====
+# Encoder + decoder + processor_group + preprocessor + mel_extractor +
+# midi_head sono tutti in P1 ckpt. Il projector e' NUOVO -> init random.
+Trainer.restore_keys = ['preprocessor', 'encoder', 'decoder',
+                         'processor_group', 'mel_extractor', 'midi_head']
+
+
+# =====
+# 3. Preprocessor time_steps (essenziale).
+# =====
+DenoisingF0LoudnessPreprocessor.time_steps = 201
+
+
+# =====
+# 4. LogMelExtractor + MIDIHead (architettura identica a P1).
+# =====
+LogMelExtractor.sample_rate = 16000
+LogMelExtractor.n_mels = 128
+LogMelExtractor.win_length = 1024
+LogMelExtractor.hop_length = 320
+LogMelExtractor.fmin = 40.0
+LogMelExtractor.fmax = 8000.0
+
+MIDIHead.n_mels = 128
+MIDIHead.ch_d1 = 256
+MIDIHead.ch_d2 = 384
+MIDIHead.ch_bottleneck = 512
+MIDIHead.bigru_units = 256
+
+
+# =====
+# 5. MIDIHeadLoss — pesi bassi (head gia' trained in P1, vogliamo che continui
+#    ma non domini il gradient).
+# =====
+MIDIHeadLoss.lambda_onset      = 0.2
+MIDIHeadLoss.lambda_subframe   = 0.05
+MIDIHeadLoss.lambda_silence    = 0.3
+MIDIHeadLoss.lambda_pitch      = 0.2
+MIDIHeadLoss.lambda_velocity   = 0.05
+MIDIHeadLoss.lambda_ks         = 0.1
+MIDIHeadLoss.onset_pos_weight   = 10.0
+MIDIHeadLoss.silence_pos_weight = 2.0
+MIDIHeadLoss.ks_pos_weight      = 20.0
+MIDIHeadLoss.onset_focal_gamma  = 1.5
+
+
+# =====
+# 6. ZAuxProjector + ZAuxDistillationLoss (NUOVI in Phase 3).
+# =====
+ZAuxProjector.midi_cond_dim          = 60
+ZAuxProjector.z_dim                  = 48
+ZAuxProjector.hidden_dim             = 64
+ZAuxProjector.use_temporal_smoothing = True
+
+# Lambda critico. Con la formulazione SCALE-INVARIANT (mse/var(z)), nmse e'
+# nell'ordine [0..1]: ~1 al passo 0, ~0 a convergenza. Range sensato per
+# lambda_aux: 0.1..0.5. Con 0.3, l'aux contribuisce al massimo ~0.3 al
+# total_loss (quando proiettore non sa nulla), e ~0 a convergenza.
+ZAuxDistillationLoss.lambda_aux        = 0.3
+ZAuxDistillationLoss.freeze_after_step = -1
+ZAuxDistillationLoss.epsilon           = 1e-3
+
+
+# =====
+# 7. DenoisingAutoencoder — Phase 3 flags.
+# =====
+DenoisingAutoencoder.mel_extractor       = @LogMelExtractor()
+DenoisingAutoencoder.midi_head           = @MIDIHead()
+DenoisingAutoencoder.midi_head_loss_obj  = @MIDIHeadLoss()
+DenoisingAutoencoder.z_aux_projector     = @ZAuxProjector()
+DenoisingAutoencoder.z_aux_loss_obj      = @ZAuxDistillationLoss()
+
+# Backbone UNFREEZED per la prima volta dopo v3 (P1 lo aveva frozen).
+# Spectral loss agisce su tutto, encoder + decoder.
+DenoisingAutoencoder.freeze_backbone          = False
+
+# midi_cond viene da HEAD predictions (NON teacher-forced). E' input del
+# projector, MAI fed al decoder (input_keys=3 sotto).
+DenoisingAutoencoder.use_teacher_forcing_midi = False
+
+# Niente pitch fusion (dato che decoder non vede midi_cond, non serve
+# che f0 sia "corretto" via head). Resta CREPE puro per ora.
+DenoisingAutoencoder.use_pitch_fusion         = False
+
+# Silence gate disabilitato durante training (no senso applicarlo qui).
+# Verra' eventualmente abilitato a inferenza separatamente.
+DenoisingAutoencoder.use_silence_gate         = False
+DenoisingAutoencoder.silence_gate_floor       = 0.0
+
+
+# =====
+# 8. Decoder input_keys — IDENTICO a P1 (3 keys, no midi_cond).
+# =====
+# Questo e' il punto chiave: niente chirurgia. midi_cond va al projector
+# (z_aux distillation) e NON al decoder. Quindi nessuna shape mismatch al
+# restore di P1.
+RnnFcDecoder.input_keys = ('ld_scaled', 'f0_scaled', 'z')
+
+
+# =====
+# 9. LR schedule per Phase 3.
+# =====
+# Decoder unfreezed per la prima volta -> partiamo CON CAUTELA. LR molto
+# basso, decay leggero. 100k step totali.
+#   1e-5 * 0.9^(100000/15000) = 1e-5 * 0.9^6.67 = ~5e-6 alla fine.
+learning_rate = 1e-5
+Trainer.learning_rate = %learning_rate
+Trainer.lr_decay_steps = 15000
+Trainer.lr_decay_rate = 0.9
+Trainer.grad_clip_norm = 1.5
+Trainer.checkpoints_to_keep = 20
+
+train.batch_size = 2
+# num_steps ASSOLUTO: parte da 124000 (ckpt P1), aggiungi 100k step di P3.
+train.num_steps = 224000
+train.steps_per_summary = 500
+train.steps_per_save = 2500
+
+
+# =====
+# 10. Degradation: livello fisso v3 (no ramp). Curriculum gia' fatto in v3.
+# =====
+DegradationPipeline:
+  sample_rate = %sample_rate
+  phasing_wet = 65
+  ghosting_wet = 65
+  wrong_eq_wet = 65
+  compression_wet = 65
+  dynamic_eq_wet = 65
+  bandwidth_wet = 65
+  clean_passthrough_prob = 0.10
+  min_n_apply = 4
+  max_n_apply = 6
+  wet_schedule_steps = 0
+  preserve_loudness = True
+  max_loudness_gain_db = 12.0

@@ -1,0 +1,37 @@
+# ============================================================
+# BassWave RAM-budget gin config — 16 GB host RAM, BS=2
+# Apply on top of your existing model gin:
+#   ddsp_run ... --gin_file=your_model.gin \
+#               --gin_file=basswave_ram_budget.gin
+# ============================================================
+
+# -----------------------------------------------------------
+# Data pipeline — tutti i nuovi parametri RAM-safe
+# -----------------------------------------------------------
+BassWaveTFRecordProvider.interleave_cycle_length = 8
+BassWaveTFRecordProvider.interleave_block_length = 4
+
+# None → cpu_count()//2 a runtime; oppure imposta un numero fisso
+# (es. 4 su una macchina 8-core) se vuoi essere esplicito.
+BassWaveTFRecordProvider.num_parallel_calls = None
+
+# Shuffle buffer in RAM: 64 esempi × ~950 KB ≈ 60 MB
+# Aumenta solo se hai RAM libera; 0 = solo shuffle su file names
+BassWaveTFRecordProvider.shuffle_buffer_size = 64
+
+# Prefetch: 2 batch dopo il .batch() — sostituisce AUTOTUNE illimitato
+# Con BS=2 e ~950 KB/esempio → 2 batch × 2 × 950 KB ≈ 3.8 MB prefetch
+BassWaveTFRecordProvider.prefetch_size = 2
+
+# -----------------------------------------------------------
+# Training loop
+# -----------------------------------------------------------
+train.batch_size = 2
+
+# -----------------------------------------------------------
+# TF threading (via variabili d'ambiente nel docker run, non gin)
+# Metti queste nel tuo docker-compose o script di avvio:
+#   -e TF_NUM_INTEROP_THREADS=2
+#   -e TF_NUM_INTRAOP_THREADS=4
+#   -e MALLOC_TRIM_THRESHOLD_=0
+# -----------------------------------------------------------

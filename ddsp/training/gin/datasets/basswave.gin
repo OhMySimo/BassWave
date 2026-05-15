@@ -1,0 +1,56 @@
+# -*-Python-*-
+# BassWave dataset (44.1 kHz mono FLAC bass).
+#
+# The prep script (prepare_basswave.py) writes basswave_manifest.json into
+# the SAME directory as the TFRecord shards. The provider auto-loads it.
+# If you move shards, move the manifest too — or pass `manifest_path=`
+# explicitly.
+#
+# Override on the command line:
+#   --gin_param="train_data/BassWaveTFRecordProvider.file_pattern='/path/basswave-train-*.tfrecord'"
+
+include 'datasets/base.gin'
+import ddsp.training
+
+# ---------- Train ----------
+train.data_provider = @train_data/data_basswave.BassWaveTFRecordProvider()
+train_data/BassWaveTFRecordProvider:
+  file_pattern = '/media/simone/NVME/MidiDataset/BassWave_TFR/basswave-train-*.tfrecord'
+  example_secs = 4
+  sample_rate = 44100
+  frame_rate = 50
+  centered = True
+  balance_presets = True   # Now driven by the manifest's preset counts.
+  # Drop presets with < 50 examples (multi_fx1=1, mid_scoop=3,
+  # modern_clean_picked=4, modern_effected=4, modern_picked=5,
+  # focus_and_warm=6, Funky_Fingers=42 — total 65 files = ~0.25% of
+  # dataset). They cannot form useful clusters in the latent space at
+  # z_dim=48; sampling them risks polluting the encoder's z manifold.
+  min_preset_count = 50
+
+# ---------- Eval ----------
+evaluate.data_provider = @eval_data/data_basswave.BassWaveTFRecordProvider()
+eval_data/BassWaveTFRecordProvider:
+  file_pattern = '/media/simone/NVME/MidiDataset/BassWave_TFR/basswave-eval-*.tfrecord'
+  example_secs = 4
+  sample_rate = 44100
+  frame_rate = 50
+  centered = True
+  balance_presets = False
+
+# ---------- Sample ----------
+sample.data_provider = @sample_data/data_basswave.BassWaveTFRecordProvider()
+sample_data/BassWaveTFRecordProvider:
+  file_pattern = '/media/simone/NVME/MidiDataset/BassWave_TFR/basswave-eval-*.tfrecord'
+  example_secs = 4
+  sample_rate = 44100
+  frame_rate = 50
+  centered = True
+  balance_presets = False
+
+# Adjust eval batch count: ~5% of ~70k windows / batch_size=16 ≈ 200 batches
+# (dataset grew to 23k files = ~70k windows with 4s/2s window/hop).
+evaluate.num_batches = 50
+evaluate.batch_size = 16
+sample.num_batches = 1
+sample.batch_size = 16

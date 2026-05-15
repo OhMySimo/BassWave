@@ -1,0 +1,34 @@
+# -*-Python-*-
+# BassWave end-to-end pipeline @ 44.1 kHz.
+#
+# Run with:
+#   ddsp_run \
+#     --mode=train \
+#     --save_dir=/path/to/save_dir \
+#     --gin_file=papers/basswave/basswave_44k.gin \
+#     --gin_param="batch_size=8" \
+#     --gin_param="train.num_steps=500000"
+
+include 'datasets/basswave.gin'
+include 'models/basswave_denoise.gin'
+include 'optimization/base.gin'
+
+# Override base optimizer settings for this task:
+# - LR=3e-5: paper-equivalent for this BPTT length, more stable for the
+#   denoising objective (gradient through the corruption layer is noisier).
+# - grad_clip_norm=2.0: tighter than default 3.0 to handle CREPE f0 jumps
+#   on low-F0 bass.
+# - batch_size=8: at 44.1 kHz, n_samples=177282, with z_time_steps=250 a
+#   batch of 8 fits ~22 GB on a 24 GB GPU. Reduce if OOM.
+
+learning_rate = 3e-5
+batch_size = 8
+
+Trainer.lr_decay_steps = 20000
+Trainer.lr_decay_rate = 0.98
+Trainer.grad_clip_norm = 2.0
+Trainer.checkpoints_to_keep = 20
+
+train.num_steps = 500000
+train.steps_per_summary = 500
+train.steps_per_save = 2000
